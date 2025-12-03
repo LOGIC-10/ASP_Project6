@@ -64,3 +64,7 @@ tmp_eval.py
 # *.pkl
 # *.pkl.gz
 
+# Project-specific data files
+Project6_musicDB.mat
+Project6.pdf
+
