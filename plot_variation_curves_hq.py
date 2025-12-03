@@ -84,11 +84,11 @@ def _sample_clip(sig: np.ndarray, fs: int, clip_sec: float, rng: np.random.Gener
 def main():
     fs = 16000
     clip_sec = 3.0
-    pitch_vals = list(range(-6, 7, 1))  # -6..+6 semitones
-    tempo_vals = [0.80, 0.90, 0.95, 1.00, 1.05, 1.10, 1.20]
-    heat_pitch = [-4, -2, 0, 2, 4]
-    heat_tempo = [0.85, 0.9, 1.0, 1.1, 1.15]
-    n_queries_curve = 6
+    pitch_vals = [-4, -2, 0, 2, 4]  # moderate grid for runtime
+    tempo_vals = [0.80, 0.90, 1.00, 1.10, 1.20]
+    heat_pitch = [-4, 0, 4]
+    heat_tempo = [0.9, 1.0, 1.1]
+    n_queries_curve = 4
     n_queries_heat = 2
     seeds_base = 123
 
