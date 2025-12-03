@@ -360,14 +360,63 @@ def main() -> None:
     if "state" not in st.session_state:
         st.session_state.state = {}
 
-    fp_record = st.session_state.state.get("fp_record")
+    state = st.session_state.state
+    fp_record = state.get("fp_record")
+    if fp_record is None:
+        default_mode = "Baseline (constellation)"
+        mat_path = str(DEFAULT_DB_PATH)
+        cache_path = _default_cache_path(default_mode)
+        with st.spinner("Preparing default fingerprint DB..."):
+            fp, summary = load_or_build_fingerprints(mat_path, default_mode, cache_path, persist=True)
+            songs = load_music_library(mat_path)
+        state["fp_record"] = {
+            "fp": fp,
+            "summary": summary,
+            "mode": default_mode,
+            "mat_path": mat_path,
+            "songs": songs,
+        }
+        fp_record = state["fp_record"]
+    if "last_result" not in state and fp_record.get("songs"):
+        default_song = fp_record["songs"][0]
+        clip = slice_signal(default_song["signal"], 16000, 0.0, 3.0)
+        clip_prepared = prepare_clip(clip, 16000, fp_record["fp"].params["fs"])
+        identify_fn = identify_song_chroma if fp_record["mode"].startswith("Chroma") else identify_song
+        song_id, info = identify_fn(clip_prepared, fp_record["fp"], fs=fp_record["fp"].params["fs"], return_info=True)
+        analysis = analyze_query(clip_prepared, fp_record["fp"].params, fp_record["mode"])
+        state["last_result"] = {
+            "song_id": song_id,
+            "info": info,
+            "analysis": analysis,
+            "clip_label": f"musicDB · {default_song['title']}",
+            "clip_sr": 16000,
+            "clip_duration": clip_prepared.size / fp_record["fp"].params["fs"],
+            "fp_params": fp_record["fp"].params,
+            "augment_summary": [],
+            "augment_cfg": {
+                "add_noise": False,
+                "noise_snr_db": 25.0,
+                "noise_seed": 0,
+                "pitch_shift": 0.0,
+                "tempo_factor": 1.0,
+            },
+        }
+        state["clip_defaults"] = {
+            "source": "musicDB random",
+            "song_idx": 0,
+            "clip_len": 3.0,
+            "start_time": 0.0,
+        }
 
-    controls_col, viz_col, results_col = st.columns([1.0, 1.8, 1.2], gap="large")
+    controls_col, status_col = st.columns([1.35, 1.0], gap="large")
 
     with controls_col:
         st.subheader("1. Fingerprint database")
-        mode = st.selectbox("Fingerprint design", ["Baseline (constellation)", "Chroma (pitch-robust)"])
-        mat_path = st.text_input("Project6_musicDB.mat path", str(DEFAULT_DB_PATH))
+        mode_options = ["Baseline (constellation)", "Chroma (pitch-robust)"]
+        stored_mode = fp_record.get("mode", mode_options[0])
+        mode_index = mode_options.index(stored_mode) if stored_mode in mode_options else 0
+        mode = st.selectbox("Fingerprint design", mode_options, index=mode_index)
+        mat_path = st.text_input("Project6_musicDB.mat path", fp_record.get("mat_path", str(DEFAULT_DB_PATH)))
         cache_path_default = _default_cache_path(mode)
         cache_path_str = st.text_input("Fingerprint cache (.pkl)", str(cache_path_default))
         persist_cache = st.checkbox("Persist cache after build", value=True)
@@ -385,26 +434,25 @@ def main() -> None:
             }
             need_build = False
             st.success(f"Fingerprint DB ready: {summary['num_songs']} songs")
+            fp_record = st.session_state.state.get("fp_record")
 
-        fp_record = st.session_state.state.get("fp_record")
-        if fp_record and not need_build:
-            stats = fp_record["summary"]
-            st.metric("Songs", stats["num_songs"])
-            st.metric("Total hashes", f"{stats['total_hashes']:,}")
-            st.metric("Total peaks", f"{stats['total_peaks']:,}")
-            st.write(
-                f"Hash entries: {stats['hash_index_size']:,} · avg {stats['avg_hashes_per_song']:.0f} hashes/song · build time ~{stats['total_build_time']:.1f}s"
-            )
-        else:
+        if not fp_record or need_build:
             st.info("Load the fingerprint DB to unlock the rest of the UI.")
 
         st.divider()
         st.subheader("2. Choose query clip")
-        clip_source = st.radio("Clip source", ["musicDB random", "Upload local audio"])
+        clip_defaults = state.setdefault(
+            "clip_defaults",
+            {"source": "musicDB random", "song_idx": 0, "clip_len": 3.0, "start_time": 0.0},
+        )
+        source_options = ["musicDB random", "Upload local audio"]
+        source_index = source_options.index(clip_defaults.get("source", source_options[0]))
+        clip_source = st.radio("Clip source", source_options, index=source_index)
         clip_signal: Optional[np.ndarray] = None
         clip_sr = 16000
         clip_label = ""
         selection_range = (0.0, 3.0)
+        current_song_idx = clip_defaults.get("song_idx", 0)
 
         if clip_source == "musicDB random":
             if not fp_record or not fp_record.get("songs"):
@@ -415,11 +463,14 @@ def main() -> None:
                     "Select song",
                     options=list(range(len(songs))),
                     format_func=lambda idx: format_song_display(songs[idx]),
+                    index=min(clip_defaults.get("song_idx", 0), len(songs) - 1),
                 )
+                current_song_idx = song_idx
                 song_meta = songs[song_idx]
                 duration = song_meta["signal"].size / clip_sr
                 clip_len_max = max(1.0, min(8.0, duration))
-                clip_len = st.slider("Clip length (s)", 1.0, clip_len_max, min(3.0, clip_len_max), step=0.5)
+                clip_len_value = min(clip_defaults.get("clip_len", 3.0), clip_len_max)
+                clip_len = st.slider("Clip length (s)", 1.0, clip_len_max, clip_len_value, step=0.5)
                 max_start = max(0.0, duration - clip_len)
                 start_key = "musicdb_start"
                 if start_key not in st.session_state:
@@ -428,7 +479,8 @@ def main() -> None:
                     st.session_state[start_key] = float(random.uniform(0.0, max_start))
                 start_val = min(float(st.session_state[start_key]), max_start)
                 st.session_state[start_key] = start_val
-                start_time = st.slider("Start time (s)", 0.0, float(max_start), start_val, key=start_key)
+                start_default = min(clip_defaults.get("start_time", start_val), max_start)
+                start_time = st.slider("Start time (s)", 0.0, float(max_start), start_default, key=start_key)
                 clip_signal = slice_signal(song_meta["signal"], clip_sr, start_time, clip_len)
                 clip_label = f"musicDB · {song_meta['title']}"
                 selection_range = (start_time, start_time + clip_len)
@@ -441,9 +493,11 @@ def main() -> None:
                 data = _ensure_mono(np.asarray(data))
                 duration = data.size / sr
                 clip_len_max = max(1.0, min(12.0, duration))
-                clip_len = st.slider("Clip length (s)", 1.0, clip_len_max, min(3.0, clip_len_max), step=0.5)
+                clip_len_value = min(clip_defaults.get("clip_len", 3.0), clip_len_max)
+                clip_len = st.slider("Clip length (s)", 1.0, clip_len_max, clip_len_value, step=0.5)
                 max_start = max(0.0, duration - clip_len)
-                start_time = st.slider("Start time (s)", 0.0, float(max_start), 0.0, key="upload_start")
+                start_default = min(clip_defaults.get("start_time", 0.0), max_start)
+                start_time = st.slider("Start time (s)", 0.0, float(max_start), start_default, key="upload_start")
                 clip_signal = slice_signal(data, sr, start_time, clip_len)
                 clip_sr = sr
                 clip_label = f"Upload · {uploaded.name}"
@@ -490,6 +544,28 @@ def main() -> None:
         st.divider()
         run_btn = st.button("Identify & visualize", use_container_width=True, disabled=not run_ready)
 
+    with status_col:
+        st.subheader("Dashboard")
+        if fp_record and not need_build:
+            stats = fp_record["summary"]
+            st.metric("Songs", stats["num_songs"])
+            st.metric("Total hashes", f"{stats['total_hashes']:,}")
+            st.metric("Total peaks", f"{stats['total_peaks']:,}")
+            st.caption(
+                f"Hash entries {stats['hash_index_size']:,} · avg {stats['avg_hashes_per_song']:.0f} hashes/song · build time ~{stats['total_build_time']:.1f}s"
+            )
+        else:
+            st.info("Fingerprint DB stats unavailable until you load/build.")
+        st.divider()
+        if state.get("last_result"):
+            info_small = state["last_result"]["info"]
+            st.subheader("Latest match")
+            st.metric("Song", info_small.get("title", "N/A"))
+            st.metric("Confidence", f"{info_small.get('confidence', 0.0):.2f}")
+            st.metric("Votes", f"{info_small.get('best_votes',0)} / {info_small.get('total_votes_for_song',0)}")
+        else:
+            st.info("Run identification to populate summary metrics.")
+
     if run_btn and run_ready and processed_clip is not None and fp_record:
         fp = fp_record["fp"]
         params = fp.params
@@ -510,8 +586,15 @@ def main() -> None:
             "augment_summary": augment_summary,
             "augment_cfg": augment_cfg,
         }
+        state["clip_defaults"] = {
+            "source": clip_source,
+            "song_idx": current_song_idx,
+            "clip_len": float(clip_len) if 'clip_len' in locals() else clip_defaults.get("clip_len", 3.0),
+            "start_time": float(start_time) if 'start_time' in locals() else clip_defaults.get("start_time", 0.0),
+        }
 
     result = st.session_state.state.get("last_result")
+    viz_col, results_col = st.columns([1.8, 1.2], gap="large")
     if not result:
         viz_col.info("Select a clip and press identify to view the spectrogram.")
         results_col.info("Match results will appear after running the query.")
