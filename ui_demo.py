@@ -484,7 +484,9 @@ def main() -> None:
                 clip_signal = slice_signal(song_meta["signal"], clip_sr, start_time, clip_len)
                 clip_label = f"musicDB · {song_meta['title']}"
                 selection_range = (start_time, start_time + clip_len)
-                st.plotly_chart(make_waveform_preview(song_meta["signal"], clip_sr, selection_range), use_container_width=True)
+                st.plotly_chart(
+                    make_waveform_preview(song_meta["signal"], clip_sr, selection_range), width="stretch"
+                )
                 st.caption(f"Clip length {clip_len:.2f}s · starts at {start_time:.2f}s / {duration:.1f}s total")
         else:
             uploaded = st.file_uploader("Upload audio (.wav/.mp3/.flac)", type=["wav", "mp3", "flac", "ogg", "m4a"])
@@ -502,7 +504,7 @@ def main() -> None:
                 clip_sr = sr
                 clip_label = f"Upload · {uploaded.name}"
                 selection_range = (start_time, start_time + clip_len)
-                st.plotly_chart(make_waveform_preview(data, sr, selection_range), use_container_width=True)
+                st.plotly_chart(make_waveform_preview(data, sr, selection_range), width="stretch")
                 st.caption(f"Original sample rate {sr} Hz · clip {clip_len:.2f}s")
 
         augment_cfg = {
@@ -542,7 +544,7 @@ def main() -> None:
 
         run_ready = processed_clip is not None and fp_record and not need_build
         st.divider()
-        run_btn = st.button("Identify & visualize", use_container_width=True, disabled=not run_ready)
+        run_btn = st.button("Identify & visualize", width="stretch", disabled=not run_ready)
 
     with status_col:
         st.subheader("Dashboard")
@@ -632,7 +634,7 @@ def main() -> None:
 
         show_all_peaks = st.checkbox("Overlay all detected peaks", value=True)
         spec_fig = build_spectrogram_figure(analysis, matched_points, show_all_peaks=show_all_peaks)
-        st.plotly_chart(spec_fig, use_container_width=True)
+        st.plotly_chart(spec_fig, width="stretch")
 
         if matched_points:
             peak_df = pd.DataFrame(matched_points)
@@ -653,7 +655,7 @@ def main() -> None:
         st.write(f"Votes: {info.get('best_votes',0)} / {info.get('total_votes_for_song',0)}")
 
         st.markdown("**Offset vote distribution**")
-        st.plotly_chart(build_offset_chart(info.get("top_matches", []), hop, fs), use_container_width=True)
+        st.plotly_chart(build_offset_chart(info.get("top_matches", []), hop, fs), width="stretch")
 
         st.markdown("**Fingerprint density stats**")
         num_peaks = info.get("query_num_peaks", 0)
