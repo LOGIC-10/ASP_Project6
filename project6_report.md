@@ -82,7 +82,7 @@ The results show that the baseline constellation achieves perfect accuracy on cl
 
 ### 4.3 Build time and memory
 
-The fingerprint database construction cost is summarized by the same experiments and is worth stating explicitly because it determines both storage requirements and indexing latency. Design A builds in about 7.5 seconds on the reference machine, generates roughly 2,548,502 hashes, and uses about 19.4 megabytes for hash storage if each hash is represented as a 32‑bit integer with associated song and offset indices. The ablation variant constructs 2,251,765 hashes in approximately 6.1 seconds, reducing both the number of peaks and the number of hashes by about ten percent. Design B is the smallest of the three, with 777,332 hashes, a build time of 3.6 seconds, and an estimated memory footprint of roughly 5.9 megabytes.
+The fingerprint database construction cost is summarized by the same experiments and is worth stating explicitly because it determines both storage requirements and indexing latency. Design A builds in about 7.5 seconds on the reference machine, generates roughly 2,548,502 hashes, and uses about 19.4 megabytes for hash storage if each hash is represented as a 32‑bit integer with associated song and offset indices. The ablation variant constructs 2,251,765 hashes in approximately 6.1 seconds, reducing both the number of peaks and the number of hashes by about ten percent. Design B is the smallest of the three, with 777,332 hashes, a build time of roughly 35 seconds, and an estimated memory footprint of roughly 5.9 megabytes.
 
 These aggregate figures are consistent with the raw logs emitted by `compare_designs.py`, an excerpt of which is reproduced below for reference:
 
@@ -112,7 +112,7 @@ Looking more closely at individual genres, several recurring error modes emerge.
 
 ## 5. Robustness Analysis
 
-Robustness to degradations is a central requirement for audio fingerprinting systems. This section discusses how the proposed designs behave under three types of distortions: additive noise, pitch shifts, and tempo changes. In addition to the tabular summary in Table 1, the figures produced by `plot_variation_curves_hq.py` and related scripts provide visual confirmation of the trends. The key plots are `plots/pitch_curve_hq.png`, `plots/tempo_curve_hq.png`, and `plots/pitch_tempo_heatmap_hq.png`.
+Robustness to degradations is a central requirement for audio fingerprinting systems. This section discusses how the proposed designs behave under three types of distortions: additive noise, pitch shifts, and tempo changes. In addition to the tabular summary in Table 1, the figures produced by `plot_variation_curves_hq.py` and related scripts provide visual confirmation of the trends. The most important visuals are the high‑quality pitch and tempo sweeps (Figures&nbsp;1 and 2) and the chroma pitch–tempo heat map (Figure&nbsp;3).
 
 ### 5.1 Noise robustness
 
@@ -128,7 +128,7 @@ Multi‑tempo search applied on top of the baseline offers a very limited improv
 
 ### 5.3 Tempo robustness
 
-Tempo robustness is summarized in `plots/tempo_curve_hq.png` and the pitch–tempo heat map `plots/pitch_tempo_heatmap_hq.png`. Surprisingly, the baseline constellation is quite tolerant to moderate global time‑stretching in the range 0.8 to 1.2. This is because the hash representation captures relative time differences between anchor and target peaks. When the entire clip is uniformly stretched in time, these differences scale approximately linearly, and for small changes the resulting integer `dt` values often remain unchanged after rounding, preserving many of the original hashes. The experimental curves show that baseline accuracy remains essentially perfect across the tested tempo factors, with only a modest change in lookup latency.
+Tempo robustness is summarized by the high‑quality tempo sweep in Figure&nbsp;2 and the pitch–tempo heat map in Figure&nbsp;3. Surprisingly, the baseline constellation is quite tolerant to moderate global time‑stretching in the range 0.8 to 1.2. This is because the hash representation captures relative time differences between anchor and target peaks. When the entire clip is uniformly stretched in time, these differences scale approximately linearly, and for small changes the resulting integer `dt` values often remain unchanged after rounding, preserving many of the original hashes. The experimental curves show that baseline accuracy remains essentially perfect across the tested tempo factors, with only a modest change in lookup latency.
 
 Chroma behaves reasonably under moderate tempo changes but less robustly than the baseline. Its accuracy curve is flatter than the baseline’s and shows more variability across tempo factors, reflecting the compound effect of chroma computation and peak picking on stretched signals. When both pitch and tempo are altered simultaneously, as visualized in the heat map, chroma delivers mixed behavior: some combinations of pitch and tempo still achieve usable accuracy, while others fail due to the interaction between key normalization and time stretching.
 
@@ -156,25 +156,48 @@ Table 3 reports the corresponding tempo‑sweep results for the same three confi
 
 These tables make several patterns explicit. The baseline design is highly sensitive to pitch shifts: its accuracy collapses to zero as soon as the key is moved by even two semitones. Combining the baseline with multi‑tempo search improves the zero‑shift accuracy slightly by compensating for resampling artifacts, but it does not fundamentally change the dependence on pitch. Chroma, in contrast, maintains usable accuracy across several semitone steps and shows only a gradual decline as the key moves farther away from the training condition. On the tempo axis the situation is reversed. The baseline is perfectly robust across the tested tempo factors, confirming the intuition that anchor–target time differences are largely preserved under modest time‑stretching. Chroma’s accuracy is lower and more variable across tempo factors, and the multi‑tempo baseline offers no additional benefit in this particular sweep.
 
-The numerical sweep results are complemented by the figures generated from the same experiments. Figure&nbsp;1 shows the pitch‑sweep accuracy curves for the baseline and chroma designs using the higher‑quality evaluation configuration:
+The numerical sweep results are complemented by the figures generated from the same experiments. Figure&nbsp;1 shows the pitch‑sweep accuracy curves for the baseline and chroma designs using the higher‑quality evaluation configuration, while Figure&nbsp;2 presents the corresponding tempo‑sweep curves. For clarity, the two plots are grouped into a single figure:
 
-![Pitch‑sweep accuracy for baseline and chroma (high‑quality evaluation)](plots/pitch_curve_hq.png){width=55%}
+\begin{figure}[htbp]
+\centering
+\begin{minipage}[b]{0.48\linewidth}
+\centering
+\includegraphics[width=\linewidth]{plots/pitch_curve_hq.png}
+\end{minipage}
+\hfill
+\begin{minipage}[b]{0.48\linewidth}
+\centering
+\includegraphics[width=\linewidth]{plots/tempo_curve_hq.png}
+\end{minipage}
+\end{figure}
 
-Figure&nbsp;2 presents the corresponding tempo‑sweep accuracy curves:
+Finally, Figure&nbsp;3 displays the pitch–tempo accuracy heat map for the chroma design at pitch shifts -4, 0, and +4 semitones and tempo factors 0.9, 1.0, and 1.1. For completeness, the earlier exploratory sweeps with only two queries per grid point are also included in the repository. These preliminary figures, created by `plot_variation_curves.py` together with `run_pitch_curve.py`, `run_tempo_curve.py`, and `run_heatmap.py`, are shown in Figures&nbsp;4, 5, and 6. The high‑quality and coarse pitch–tempo heat maps are presented together to facilitate direct visual comparison:
 
-![Tempo‑sweep accuracy for baseline and chroma (high‑quality evaluation)](plots/tempo_curve_hq.png){width=55%}
+\begin{figure}[htbp]
+\centering
+\begin{minipage}[b]{0.48\linewidth}
+\centering
+\includegraphics[width=\linewidth]{plots/pitch_tempo_heatmap_hq.png}
+\end{minipage}
+\hfill
+\begin{minipage}[b]{0.48\linewidth}
+\centering
+\includegraphics[width=\linewidth]{plots/pitch_tempo_heatmap.png}
+\end{minipage}
+\end{figure}
 
-Finally, Figure&nbsp;3 displays the pitch–tempo accuracy heat map for the chroma design at pitch shifts -4, 0, and +4 semitones and tempo factors 0.9, 1.0, and 1.1:
-
-![Pitch–tempo robustness heat map for chroma (high‑quality evaluation)](plots/pitch_tempo_heatmap_hq.png){width=55%}
-
-For completeness, the earlier exploratory sweeps with only two queries per grid point are also included in the repository. These preliminary figures, created by `plot_variation_curves.py` together with `run_pitch_curve.py`, `run_tempo_curve.py`, and `run_heatmap.py`, are shown in Figures&nbsp;4, 5, and 6:
-
-![Coarse pitch‑sweep accuracy curves (exploratory run)](plots/pitch_curve.png){width=55%}
-
-![Coarse tempo‑sweep accuracy curves (exploratory run)](plots/tempo_curve.png){width=55%}
-
-![Coarse pitch–tempo robustness heat map for chroma (exploratory run)](plots/pitch_tempo_heatmap.png){width=55%}
+\begin{figure}[htbp]
+\centering
+\begin{minipage}[b]{0.48\linewidth}
+\centering
+\includegraphics[width=\linewidth]{plots/pitch_curve.png}
+\end{minipage}
+\hfill
+\begin{minipage}[b]{0.48\linewidth}
+\centering
+\includegraphics[width=\linewidth]{plots/tempo_curve.png}
+\end{minipage}
+\end{figure}
 
 Although the coarse sweeps are noisier because they use far fewer queries per point, their overall shape matches the trends observed in the higher‑quality experiments. Including both sets of figures in the report makes it clear how the design was iteratively refined and provides a visual check that the conclusions drawn from the final curves are consistent with earlier exploratory runs.
 
