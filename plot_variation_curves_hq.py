@@ -8,16 +8,21 @@ Outputs:
 
 Runs librosa pitch_shift/time_stretch (high quality). Uses cached fingerprints to avoid rebuild.
 Exec in asp env:
-    conda run -n asp python plot_variation_curves_hq.py
+    conda run -n asp python plot_variation_curves_hq.py --from-cache cache/variation_results.json
+
+If --from-cache is not provided, will run fresh sweeps (may be long). Prefer generating data with variation_runner.py.
 """
 from __future__ import annotations
 
+import argparse
 import gzip
+import json
 import os
 import pickle
 import time
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Tuple
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import librosa
 import matplotlib.pyplot as plt
@@ -80,90 +85,196 @@ def _sample_clip(sig: np.ndarray, fs: int, clip_sec: float, rng: np.random.Gener
     return sig[start : start + clip_len]
 
 
+def _load_flat_db(mat_path: str):
+    data = sio.loadmat(mat_path)
+    db = data["musicDB"]
+    return list(_iter_music_db(db))
+
+
+def _eval_pitch_worker(
+    semi: float,
+    n_queries: int,
+    fs: int,
+    clip_sec: float,
+    mat_path: str,
+    fp_base_path: str,
+    fp_chroma_path: str,
+    seed: int,
+) -> Tuple[float, float]:
+    flat_db = _load_flat_db(mat_path)
+    fp_base = _load_fp(Path(fp_base_path))
+    fp_chroma = _load_fp(Path(fp_chroma_path))
+    rng = np.random.default_rng(seed + int(semi * 10))
+    hits_b = hits_c = 0
+    for _ in range(n_queries):
+        idx = int(rng.integers(0, len(flat_db)))
+        sig = flat_db[idx][2]
+        clip = librosa.effects.pitch_shift(y=_sample_clip(sig, fs, clip_sec, rng), sr=fs, n_steps=semi)
+        pred_b, _ = identify_song(clip, fp_base, fs=fs, return_info=True)
+        pred_c, _ = identify_song_chroma(clip, fp_chroma, fs=fs, return_info=True)
+        hits_b += int(pred_b == idx)
+        hits_c += int(pred_c == idx)
+    return hits_b / n_queries, hits_c / n_queries
+
+
+def _eval_tempo_worker(
+    rate: float,
+    n_queries: int,
+    fs: int,
+    clip_sec: float,
+    mat_path: str,
+    fp_base_path: str,
+    fp_chroma_path: str,
+    seed: int,
+) -> Tuple[float, float]:
+    flat_db = _load_flat_db(mat_path)
+    fp_base = _load_fp(Path(fp_base_path))
+    fp_chroma = _load_fp(Path(fp_chroma_path))
+    rng = np.random.default_rng(seed + int(rate * 100))
+    hits_b = hits_c = 0
+    for _ in range(n_queries):
+        idx = int(rng.integers(0, len(flat_db)))
+        sig = flat_db[idx][2]
+        clip = librosa.effects.time_stretch(y=_sample_clip(sig, fs, clip_sec, rng), rate=rate)
+        pred_b, _ = identify_song_multi_tempo(clip, fp_base, fs=fs, tempo_factors=(0.9, 1.0, 1.1), return_info=True)
+        pred_c, _ = identify_song_multi_tempo(
+            clip, fp_chroma, fs=fs, tempo_factors=(0.9, 1.0, 1.1), identify_fn=identify_song_chroma, return_info=True
+        )
+        hits_b += int(pred_b == idx)
+        hits_c += int(pred_c == idx)
+    return hits_b / n_queries, hits_c / n_queries
+
+
+def _eval_heat_worker(
+    p: float,
+    t: float,
+    n_queries: int,
+    fs: int,
+    clip_sec: float,
+    mat_path: str,
+    fp_chroma_path: str,
+    seed: int,
+) -> float:
+    flat_db = _load_flat_db(mat_path)
+    fp_chroma = _load_fp(Path(fp_chroma_path))
+    rng = np.random.default_rng(seed + int(p * 10) + int(t * 100))
+    hits = 0
+    for _ in range(n_queries):
+        idx = int(rng.integers(0, len(flat_db)))
+        sig = flat_db[idx][2]
+        clip = librosa.effects.pitch_shift(y=_sample_clip(sig, fs, clip_sec, rng), sr=fs, n_steps=p)
+        clip = librosa.effects.time_stretch(y=clip, rate=t)
+        pred, _ = identify_song_chroma(clip, fp_chroma, fs=fs, return_info=True)
+        hits += int(pred == idx)
+    return hits / n_queries
+
+
 # -------------------- main -------------------- #
 def main():
+    parser = argparse.ArgumentParser(description="High-fidelity pitch/tempo sweep and plotting.")
+    parser.add_argument("--from-cache", type=str, default=None, help="Path to variation_results.json to plot without recompute")
+    parser.add_argument("--workers", type=int, default=4, help="Process pool size when computing")
+    parser.add_argument("--nq_curve", type=int, default=4, help="Queries per factor for pitch/tempo")
+    parser.add_argument("--nq_heat", type=int, default=2, help="Queries per cell for heatmap")
+    args = parser.parse_args()
+
     fs = 16000
     clip_sec = 3.0
     pitch_vals = [-4, -2, 0, 2, 4]  # moderate grid for runtime
     tempo_vals = [0.80, 0.90, 1.00, 1.10, 1.20]
     heat_pitch = [-4, 0, 4]
     heat_tempo = [0.9, 1.0, 1.1]
-    n_queries_curve = 4
-    n_queries_heat = 2
+    n_queries_curve = args.nq_curve
+    n_queries_heat = args.nq_heat
+    max_workers = args.workers  # parallel processes for factor sweeps
     seeds_base = 123
 
     PLOTS_DIR.mkdir(parents=True, exist_ok=True)
-    ensure_fingerprint_caches(MAT_PATH)
+    if args.from_cache:
+        cache_path = Path(args.from_cache)
+        if not cache_path.exists():
+            raise FileNotFoundError(f"{cache_path} not found. Run variation_runner.py to generate it.")
+        cached = json.loads(cache_path.read_text())
+        pitch_vals = cached.get("pitch_vals", pitch_vals)
+        tempo_vals = cached.get("tempo_vals", tempo_vals)
+        heat_pitch = cached.get("heat_pitch", heat_pitch)
+        heat_tempo = cached.get("heat_tempo", heat_tempo)
+        pitch_acc_base = cached.get("pitch_base")
+        pitch_acc_chroma = cached.get("pitch_chroma")
+        tempo_acc_base = cached.get("tempo_base")
+        tempo_acc_chroma = cached.get("tempo_chroma")
+        heat_acc = np.array(cached.get("heat_acc")) if cached.get("heat_acc") is not None else None
+        if pitch_acc_base is None or tempo_acc_base is None or heat_acc is None:
+            raise ValueError("Cache file missing required fields. Re-run variation_runner.py.")
+        print(f"Loaded results from {cache_path}")
+    else:
+        ensure_fingerprint_caches(MAT_PATH)
 
-    # Load db and fingerprints once
-    print("Loading musicDB and fingerprints into memory...", flush=True)
-    flat_db = list(_iter_music_db(load_music_db(MAT_PATH)))
-    fp_base = _load_fp(FP_BASE_CACHE)
-    fp_chroma = _load_fp(FP_CHROMA_CACHE)
+        print(f"Evaluating pitch curve (high fidelity, parallel, workers={max_workers})...", flush=True)
+        pitch_acc_base = [0.0] * len(pitch_vals)
+        pitch_acc_chroma = [0.0] * len(pitch_vals)
+        with ProcessPoolExecutor(max_workers=max_workers) as ex:
+            futures = {}
+            for idx, semi in enumerate(pitch_vals):
+                futures[ex.submit(
+                    _eval_pitch_worker,
+                    semi,
+                    n_queries_curve,
+                    fs,
+                    clip_sec,
+                    MAT_PATH,
+                    str(FP_BASE_CACHE),
+                    str(FP_CHROMA_CACHE),
+                    seeds_base,
+                )] = idx
+            for fut in as_completed(futures):
+                i = futures[fut]
+                acc_b, acc_c = fut.result()
+                pitch_acc_base[i] = acc_b
+                pitch_acc_chroma[i] = acc_c
 
-    rng = np.random.default_rng(seeds_base)
+        print(f"Evaluating tempo curve (high fidelity, parallel, workers={max_workers})...", flush=True)
+        tempo_acc_base = [0.0] * len(tempo_vals)
+        tempo_acc_chroma = [0.0] * len(tempo_vals)
+        with ProcessPoolExecutor(max_workers=max_workers) as ex:
+            futures = {}
+            for idx, rate in enumerate(tempo_vals):
+                futures[ex.submit(
+                    _eval_tempo_worker,
+                    rate,
+                    n_queries_curve,
+                    fs,
+                    clip_sec,
+                    MAT_PATH,
+                    str(FP_BASE_CACHE),
+                    str(FP_CHROMA_CACHE),
+                    seeds_base + 50,
+                )] = idx
+            for fut in as_completed(futures):
+                i = futures[fut]
+                acc_b, acc_c = fut.result()
+                tempo_acc_base[i] = acc_b
+                tempo_acc_chroma[i] = acc_c
 
-    def eval_pitch(semi: float) -> Tuple[float, float]:
-        def pitch_shift(clip):
-            return librosa.effects.pitch_shift(y=clip, sr=fs, n_steps=semi)
-
-        hits_b = hits_c = 0
-        for _ in range(n_queries_curve):
-            idx = int(rng.integers(0, len(flat_db)))
-            sig = flat_db[idx][2]
-            clip = pitch_shift(_sample_clip(sig, fs, clip_sec, rng))
-            pred_b, _ = identify_song(clip, fp_base, fs=fs, return_info=True)
-            pred_c, _ = identify_song_chroma(clip, fp_chroma, fs=fs, return_info=True)
-            hits_b += int(pred_b == idx)
-            hits_c += int(pred_c == idx)
-        return hits_b / n_queries_curve, hits_c / n_queries_curve
-
-    def eval_tempo(rate: float) -> Tuple[float, float]:
-        def stretch(clip):
-            return librosa.effects.time_stretch(y=clip, rate=rate)
-
-        hits_b = hits_c = 0
-        for _ in range(n_queries_curve):
-            idx = int(rng.integers(0, len(flat_db)))
-            sig = flat_db[idx][2]
-            clip = stretch(_sample_clip(sig, fs, clip_sec, rng))
-            pred_b, _ = identify_song_multi_tempo(clip, fp_base, fs=fs, tempo_factors=(0.9, 1.0, 1.1), return_info=True)
-            pred_c, _ = identify_song_multi_tempo(
-                clip, fp_chroma, fs=fs, tempo_factors=(0.9, 1.0, 1.1), identify_fn=identify_song_chroma, return_info=True
-            )
-            hits_b += int(pred_b == idx)
-            hits_c += int(pred_c == idx)
-        return hits_b / n_queries_curve, hits_c / n_queries_curve
-
-    print("Evaluating pitch curve (high fidelity, sequential)...", flush=True)
-    pitch_acc_base = []
-    pitch_acc_chroma = []
-    for semi in pitch_vals:
-        acc_b, acc_c = eval_pitch(semi)
-        pitch_acc_base.append(acc_b)
-        pitch_acc_chroma.append(acc_c)
-
-    print("Evaluating tempo curve (high fidelity, sequential)...", flush=True)
-    tempo_acc_base = []
-    tempo_acc_chroma = []
-    for rate in tempo_vals:
-        acc_b, acc_c = eval_tempo(rate)
-        tempo_acc_base.append(acc_b)
-        tempo_acc_chroma.append(acc_c)
-
-    print("Evaluating pitch-tempo heatmap (chroma)...", flush=True)
-    heat_acc = np.zeros((len(heat_tempo), len(heat_pitch)))
-    for i, t in enumerate(heat_tempo):
-        for j, p in enumerate(heat_pitch):
-            hits = 0
-            for _ in range(n_queries_heat):
-                idx = int(rng.integers(0, len(flat_db)))
-                sig = flat_db[idx][2]
-                clip = librosa.effects.pitch_shift(y=_sample_clip(sig, fs, clip_sec, rng), sr=fs, n_steps=p)
-                clip = librosa.effects.time_stretch(y=clip, rate=t)
-                pred, _ = identify_song_chroma(clip, fp_chroma, fs=fs, return_info=True)
-                hits += int(pred == idx)
-            heat_acc[i, j] = hits / n_queries_heat
+        print(f"Evaluating pitch-tempo heatmap (chroma, parallel, workers={max_workers})...", flush=True)
+        heat_acc = np.zeros((len(heat_tempo), len(heat_pitch)))
+        with ProcessPoolExecutor(max_workers=max_workers) as ex:
+            futures = {}
+            for i, t in enumerate(heat_tempo):
+                for j, p in enumerate(heat_pitch):
+                    futures[(i, j)] = ex.submit(
+                        _eval_heat_worker,
+                        p,
+                        t,
+                        n_queries_heat,
+                        fs,
+                        clip_sec,
+                        MAT_PATH,
+                        str(FP_CHROMA_CACHE),
+                        seeds_base + 200 + i * 10 + j,
+                    )
+            for (i, j), fut in futures.items():
+                heat_acc[i, j] = fut.result()
 
     # Plot pitch curve
     plt.figure(figsize=(7, 4))
